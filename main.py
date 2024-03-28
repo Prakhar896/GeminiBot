@@ -76,5 +76,3 @@ while prompt != ".exit":
         print(chunk.text, end='')
     print()
     print()
-
-chat.history[0].parts[0].text
