@@ -14,7 +14,7 @@ except Exception as e:
 app = Flask(__name__)
 CORS(app)
 
-app.secret_key = "myGeminiApp"
+app.secret_key = os.environ["APP_SECRET_KEY"]
 
 class Logger:
     '''## Intro
