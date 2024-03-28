@@ -1,6 +1,8 @@
 import os, sys, json, datetime, uuid
 from flask import Flask, request, jsonify, render_template, url_for, redirect, flash, session
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import google.generativeai as genai
 from dotenv import load_dotenv
 load_dotenv()
@@ -13,8 +15,17 @@ except Exception as e:
 
 app = Flask(__name__)
 CORS(app)
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[],
+    storage_uri="memory://",
+)
 
 app.secret_key = os.environ["APP_SECRET_KEY"]
+
+histories = {}
+locked = False
 
 class Logger:
     '''## Intro
@@ -119,42 +130,100 @@ def processHistory(history) -> list:
 
     return output
 
-histories = {}
+@app.before_request
+def beforeRequest():
+    if locked and (not request.path.startswith("/debug")):
+        return "<h1>GeminiBot is currently unavailable. Please try again later.</h1>"
 
-@app.route('/', methods=['GET', 'POST'])
+@app.route('/', methods=['GET'])
 def homepage():
+    global histories
+
+    if 'instanceID' not in session or session['instanceID'] not in histories:
+        session['instanceID'] = str(uuid.uuid4().hex)
+        histories[session['instanceID']] = []
+    
+    return render_template('index.html', chat=processHistory(histories.get(session['instanceID'], [])), instanceID=session['instanceID'])
+    
+@app.route('/sendChatMessage', methods=['POST'])
+@limiter.limit("15/minute")
+def sendChatMessage():
+    global histories
+
     if 'instanceID' not in session or session['instanceID'] not in histories:
         session['instanceID'] = str(uuid.uuid4().hex)
         histories[session['instanceID']] = []
 
-    if request.method == 'GET':
-        return render_template('index.html', chat=processHistory(histories.get(session['instanceID'], [])), instanceID=session['instanceID'])
-    else:
-        if 'message' not in request.form or request.form['message'].strip() == "":
-            flash("Please enter a message.")
-            return redirect(url_for('homepage'))
-        
-        message = request.form['message']
-
-        Gemini.chat.history = histories.get(session['instanceID'], [])
-        response = Gemini.sendMessage(message, historyInstanceID=session['instanceID'])
-
-        if response.startswith("ERROR:"):
-            Gemini.clearChatHistory()
-            flash(response)
-            return redirect(url_for('homepage'))
-        
-        histories[session['instanceID']] = Gemini.getChatHistory()
-        Gemini.clearChatHistory()
-        
+    if 'message' not in request.form or request.form['message'].strip() == "":
+        flash("Please enter a message.")
         return redirect(url_for('homepage'))
+        
+    message = request.form['message']
+
+    Gemini.chat.history = histories.get(session['instanceID'], [])
+    response = Gemini.sendMessage(message, historyInstanceID=session['instanceID'])
+
+    if response.startswith("ERROR:"):
+        Gemini.clearChatHistory()
+        flash(response)
+        return redirect(url_for('homepage'))
+        
+    histories[session['instanceID']] = Gemini.getChatHistory()
+    Gemini.clearChatHistory()
+        
+    return redirect(url_for('homepage'))
     
 @app.route('/clear')
 def clearChat():
+    global histories
+
     if 'instanceID' in session and session['instanceID'] in histories:
         del histories[session['instanceID']]
     session.clear()
     return redirect(url_for('homepage'))
+
+@app.route('/debug/<accessKey>')
+def debug(accessKey):
+    if accessKey != os.environ["APP_SECRET_KEY"]:
+        return "ERROR: Access denied."
+    
+    return """
+<h1>Options:</h1>
+<ul>
+<li>View Logs: /debug/ACCESS_KEY/logs</li>
+<li>Toggle Lock: /debug/ACCESS_KEY/toggleLock</li>
+<li>Clear Histories: /debug/ACCESS_KEY/clearHistories</li>
+</ul>
+"""
+
+@app.route('/debug/<accessKey>/logs')
+def debugLogs(accessKey):
+    if accessKey != os.environ["APP_SECRET_KEY"]:
+        return "ERROR: Access denied."
+    
+    return "<br>".join(Logger.readAll())
+
+@app.route('/debug/<accessKey>/toggleLock')
+def debugLock(accessKey):
+    global locked
+
+    if accessKey != os.environ["APP_SECRET_KEY"]:
+        return "ERROR: Access denied."
+    
+    locked = not locked
+    Logger.log("DEBUG: Toggled lock status to '{}'.".format("Locked" if locked else "Unlocked"))
+    return "SUCCESS: {}.".format("Locked" if locked else "Unlocked")
+
+@app.route('/debug/<accessKey>/clearHistories')
+def debugClearHistories(accessKey):
+    global histories
+
+    if accessKey != os.environ["APP_SECRET_KEY"]:
+        return "ERROR: Access denied."
+    
+    histories = {}
+    Logger.log("DEBUG: Cleared all chat histories.")
+    return "SUCCESS: Cleared all chat histories."
 
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=8000)
